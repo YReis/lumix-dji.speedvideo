@@ -53,6 +53,23 @@ export AI_VIDEOSPEED_ROOT=/Volumes/MyExternal/ai.videospeed
 - Partial outputs from a failed `ffmpeg` run are deleted so the next run retries that file.
 - Pass `--lut <name>` (no `.cube` extension) to the grade scripts to apply a LUT non-interactively; omit it to be prompted.
 
+### Quality presets
+
+Both grade scripts accept optional flags that swap the encoder settings and add pre/post-LUT filters:
+
+| Flag | Scripts | Encoder | Use for |
+| --- | --- | --- | --- |
+| (none) | both | HEVC VideoToolbox, `-q:v 65` (Lumix 8-bit / Osmo 10-bit) | Default. Direct LUT only. Google Photos / QuickTime. |
+| `--polish` | osmo-grade.sh | same as default, plus a light post-LUT pass | Modest cleanup on Osmo footage. |
+| `--polish-pro` | both | HEVC Main10 p010le, `-b:v 70M -maxrate 80M -bufsize 140M`, explicit Rec.709 tagging | Instagram / YouTube delivery. |
+
+`--polish-pro` is tuned for overcast tropical footage (Khao Sok, Thailand) with mixed Caucasian + East-Asian skin tones. It chains a pre-LUT denoise (`hqdn3d=4:3:6:4.5`) and warm shift (`colortemperature=5500:mix=0.2`) in log space, the chosen LUT (plus Osmo's auto `DJI_Base → DJI_Look_*` chain), then a small luminance-aware warm bump, skin-safe `eq=contrast=1.05:saturation=1.08`, and a light chroma-off `unsharp` in Rec.709. Output is 10-bit Main10 at ~70 Mbps (YouTube 4K60 SDR recommends 53-68 Mbps; the extra headroom survives YouTube's VP9/AV1 re-encode). Rec.709 is tagged explicitly so Instagram and YouTube don't mis-detect the file as HDR.
+
+```bash
+./lumix-grade.sh --lut s709 --polish-pro
+./osmo-grade.sh  --lut s709 --polish-pro
+```
+
 ## Project layout
 
 ```

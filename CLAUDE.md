@@ -50,6 +50,20 @@ Applies a 3D LUT (`.cube`) from the DaVinci Resolve user LUT folder (`myS1ii vlo
   - Videos: HEVC via Apple VideoToolbox HW (`-q:v 65`, `hvc1` tag, faststart) — delivery-grade, fast, sized for Google Photos / QuickTime.
 - **Selection:** `--lut <name>` (no `.cube` extension) to apply directly, or no arg to be prompted.
 - **Idempotent:** if the destination file exists it is skipped. Partial outputs from a failed ffmpeg run are deleted so re-runs retry that file.
+- **`--polish-pro` flag** — comprehensive preset for overcast/tropical footage (Khao Sok) with mixed Caucasian + East-Asian skin tones, output sized for IG/YouTube delivery. Filter chain and rationale:
+  - Pre-LUT (log space, more latitude for denoise + temperature shifts):
+    - `hqdn3d=4:3:6:4.5` — temporal+spatial denoise. Stronger spatial chroma (6) because overcast/log footage shows the most noise in chroma midtones.
+    - `colortemperature=temperature=5500:mix=0.2` — warm 20% toward 5500K to undo the cool cast of overcast skies. Done in log so highlights don't clip.
+  - LUT chain — the user's chosen LUT (V-Log → Rec.709 for Lumix).
+  - Post-LUT (Rec.709):
+    - `colortemperature=temperature=5600:mix=0.15:pl=0.5` — small extra warmth, `pl=0.5` makes it luminance-aware so highlights don't go orange.
+    - `eq=contrast=1.05:saturation=1.08:gamma=1.0` — saturation capped at 1.08 because anything ≥1.10 pushes Asian skin tones orange; contrast 1.05 is the gentle nudge that still leaves room for IG/YT's own re-compression.
+    - `unsharp=3:3:0.4:3:3:0.0` — 3×3 light sharpen, **chroma amount = 0.0** so we don't sharpen color noise.
+  - Encoder differs from the default `-q:v 65`:
+    - HEVC Main10 with `p010le` pixel format (preserve 10-bit log latitude through the chain).
+    - `-b:v 70M -maxrate 80M -bufsize 140M` — YouTube 4K60 SDR recommends 53-68 Mbps; 70 gives headroom for their VP9/AV1 re-encode.
+    - Explicit Rec.709 tagging: `-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv` so IG/YT don't mis-detect the file as HDR.
+    - `-tag:v hvc1`, `-movflags +faststart`, audio `copy` — same as default.
 
 ### `osmo-extract.sh`
 Copies all `.JPG` and `.MP4` files from a mounted DJI Osmo Action card into `~/Desktop/ai.videospeed/OsmoAction/`, by media type.
@@ -62,6 +76,9 @@ Copies all `.JPG` and `.MP4` files from a mounted DJI Osmo Action card into `~/D
 
 ### `osmo-grade.sh`
 Identical structure to `lumix-grade.sh`, but reads from `OsmoAction/{photos,videos}/log/` and uses LUTs from `myDJI dlogm luts` (Alister Chapman's free D-Log M creative LUT pack — 9 looks including `s709` for the neutral D-Log M → Rec.709 conversion). Encoder settings are the same (HEVC VideoToolbox, `-q:v 65`).
+
+- **`--polish` flag** — light post-LUT cleanup pass. Lower-overhead than `--polish-pro`.
+- **`--polish-pro` flag** — same comprehensive preset as `lumix-grade.sh --polish-pro` (see above for the full filter rationale: pre-LUT `hqdn3d` + 5500K warm shift in log, post-LUT luminance-aware warmth + `eq` capped at saturation 1.08 to keep Asian skin tones from going orange, chroma-off `unsharp`, HEVC Main10 p010le, `-b:v 70M -maxrate 80M -bufsize 140M`, explicit Rec.709 tagging). The Osmo variant runs after Osmo's auto LUT chain (`DJI_Base → DJI_Look_*`), so the polish chain sees Rec.709 pixels at the same stage as the Lumix variant.
 
 ## D-Log M detection (DJI Osmo Action)
 
