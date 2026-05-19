@@ -46,23 +46,33 @@ if [ "${#luts[@]}" -eq 0 ]; then
 fi
 
 selected=""
+polish_pro=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --lut) selected="${2:-}"; shift 2 ;;
     --lut=*) selected="${1#--lut=}"; shift ;;
+    --polish-pro) polish_pro=1; shift ;;
     -h|--help)
       cat <<EOF
-Usage: $(basename "$0") [--lut <name>]
+Usage: $(basename "$0") [--lut <name>] [--polish-pro]
 
 Applies a 3D LUT (.cube) to V-Log photos and videos in:
   $PHOTOS_SRC
   $VIDEOS_SRC
 
 Output goes to:
-  $SRC/Graded/<LUT>/photos/
-  $SRC/Graded/<LUT>/videos/
+  $SRC/Graded/<LUT>[_polish-pro]/photos/
+  $SRC/Graded/<LUT>[_polish-pro]/videos/
 
-Without --lut, prompts you to pick from available LUTs.
+Options:
+  --lut <name>    Apply the named LUT. Without this flag, prompts.
+  --polish-pro    Comprehensive overcast/tropical + skin-safe + IG/YT delivery:
+                  pre-LUT WB warm-up + denoise (in log space, more latitude),
+                  post-LUT skin-friendly polish (curves/sat/sharpen tuned to
+                  not push Caucasian or East-Asian skin too red/orange),
+                  HEVC 10-bit Main10 at 70 Mbps target with explicit Rec.709
+                  tagging for IG/YouTube. ~40% slower encode, ~2x file size
+                  vs the default 8-bit q:v 65, but upload-quality ready.
 
 Available LUTs:
 $(printf '  - %s\n' "${luts[@]}")
@@ -111,12 +121,43 @@ safe_lut="/tmp/lumix-grade-$$.cube"
 trap 'rm -f "$safe_lut"' EXIT
 cp "$lut_path" "$safe_lut"
 
-photos_dst="$SRC/Graded/$selected/photos"
-videos_dst="$SRC/Graded/$selected/videos"
+# --polish-pro: comprehensive pipeline for overcast/tropical V-Log delivery
+# to Instagram / YouTube. Pre-LUT denoise + WB warm in log space (more
+# latitude), then LUT, then post-LUT polish (light skin-safe contrast/sat
+# bump + sharpen). Encoder upgrades to 10-bit HEVC at IG/YT-friendly bitrate.
+# Skin-safety: saturation stays ≤1.08, no red/yellow selectivecolor pushes,
+# so neither Caucasian nor East-Asian skin shifts orange.
+if [ "$polish_pro" -eq 1 ]; then
+  pre_lut="hqdn3d=4:3:6:4.5,colortemperature=temperature=5500:mix=0.2"
+  post_lut="colortemperature=temperature=5600:mix=0.15:pl=0.5,eq=contrast=1.05:saturation=1.08:gamma=1.0,unsharp=3:3:0.4:3:3:0.0"
+  vf_video="${pre_lut},lut3d=$safe_lut,${post_lut}"
+  vf_photo="lut3d=$safe_lut,${post_lut}"
+  # IG/YT upload preset (per YouTube docs + Meta engineering blog):
+  #   Main10 / p010le : preserve 10-bit V-Log latitude through the encoder.
+  #   -b:v 70M        : YouTube 4K60 SDR recommended 53-68 Mbps; 70 gives
+  #                     headroom for their VP9/AV1 re-encode.
+  #   -maxrate/bufsize: VBR ceiling so peaks don't exceed bandwidth.
+  #   Explicit Rec.709 color tagging prevents IG/YT mis-detecting as HDR.
+  video_encoder=(-c:v hevc_videotoolbox -profile:v main10 -pix_fmt p010le \
+                 -b:v 70M -maxrate 80M -bufsize 140M -tag:v hvc1 \
+                 -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv)
+  output_suffix="_polish-pro"
+  chain_note="polish-pro (pre+post LUT + 10-bit 70Mbps IG/YT)"
+else
+  vf_video="lut3d=$safe_lut"
+  vf_photo="lut3d=$safe_lut"
+  # Default: 8-bit HEVC at quality 65, calibrated for Google Photos delivery.
+  video_encoder=(-c:v hevc_videotoolbox -q:v 65 -tag:v hvc1)
+  output_suffix=""
+  chain_note="direct"
+fi
+
+photos_dst="$SRC/Graded/${selected}${output_suffix}/photos"
+videos_dst="$SRC/Graded/${selected}${output_suffix}/videos"
 mkdir -p "$photos_dst" "$videos_dst"
 
 echo
-echo "LUT:    $selected"
+echo "LUT:    $selected ($chain_note)"
 echo "Photos: $PHOTOS_SRC -> $photos_dst"
 echo "Videos: $VIDEOS_SRC -> $videos_dst"
 echo
@@ -141,7 +182,7 @@ for src in "${photos[@]}"; do
   printf "[photo %3d/%d] %s\n" "$i" "$total_photos" "$name"
   # -q:v 2 is near-max JPEG quality (mjpeg uses 1=best, 31=worst).
   if ! ffmpeg -nostdin -loglevel error -i "$src" \
-        -vf "lut3d=$safe_lut" \
+        -vf "$vf_photo" \
         -q:v 2 \
         -y "$dst"; then
     # Remove partial output so the next run retries this file.
@@ -166,20 +207,15 @@ for src in "${videos[@]}"; do
     continue
   fi
   printf "[video %3d/%d] %s\n" "$i" "$total_videos" "$name"
-  # Encoder settings — calibrated once, do not tweak casually:
-  #   hevc_videotoolbox : Apple HW HEVC encoder, real-time+ on Apple Silicon.
-  #   -q:v 65           : VideoToolbox quality (0-100). 65 = sweet spot
-  #                       between size and quality for Google Photos delivery;
-  #                       higher numbers balloon file size with no visible
-  #                       gain on phone/QuickTime playback. Not for editing.
-  #   -tag:v hvc1       : QuickTime/Apple Photos need 'hvc1' (not 'hev1') or
-  #                       they refuse to play the file.
-  #   -c:a copy         : Lumix LPCM/AAC audio is fine, no need to re-encode.
-  #   +faststart        : Move moov atom to the head so streaming/upload
-  #                       services can begin playback before full download.
+  # Encoder settings come from the $video_encoder array — see the
+  # --polish-pro branch above for the IG/YT 10-bit variant. Common to both:
+  #   -tag:v hvc1   : QuickTime/Apple Photos/IG need 'hvc1' (not 'hev1').
+  #   -c:a copy     : Lumix LPCM/AAC audio is fine, no need to re-encode.
+  #   +faststart    : moov atom up front so streaming services can begin
+  #                   playback before the file finishes downloading.
   if ! ffmpeg -nostdin -loglevel error -stats -i "$src" \
-        -vf "lut3d=$safe_lut" \
-        -c:v hevc_videotoolbox -q:v 65 -tag:v hvc1 \
+        -vf "$vf_video" \
+        "${video_encoder[@]}" \
         -c:a copy \
         -movflags +faststart \
         -y "$dst"; then
