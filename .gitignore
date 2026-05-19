@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor backups
+*.swp
+*.swo
+*~
+
+# Local override (in case scripts grow site-specific configs)
+*.local.sh
+.env
+.env.*
